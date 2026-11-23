@@ -725,6 +725,23 @@
         </div>
       </form>
 
+      <!-- 通行密钥登录（不在 configForm 内，避免触发表单提交） -->
+      <div class="config-section active mt-8" id="passkeySection">
+        <h3 class="text-lg font-semibold text-gray-800 mb-2">
+          <i class="fas fa-key text-indigo-500 mr-2"></i>通行密钥登录
+        </h3>
+        <p class="text-sm text-gray-500 mb-4">
+          用通行密钥（Windows Hello / 手机 / 安全密钥）登录本系统，不用再输密码；密码登录仍保留作备用。
+          通行密钥绑定当前访问的域名，换域名后需重新注册。
+        </p>
+        <div id="passkeyList" class="space-y-2 mb-4">
+          <p class="text-sm text-gray-500">加载中...</p>
+        </div>
+        <button type="button" id="registerPasskeyBtn" class="btn-primary text-white px-4 py-2 rounded-md text-sm font-medium">
+          <i class="fas fa-plus mr-2"></i>注册新的通行密钥
+        </button>
+      </div>
+
       <!-- 备份与恢复（不在 configForm 内，避免触发表单提交） -->
       <div class="config-section active mt-8" id="backupSection">
         <h3 class="text-lg font-semibold text-gray-800 mb-2">
@@ -1832,6 +1849,150 @@
           importBtn.innerHTML = original;
         }
       });
+    })();
+
+    // ───────────────────────────────────────────────────────
+    // 通行密钥管理：注册 / 列表 / 删除
+    // ───────────────────────────────────────────────────────
+    (function () {
+      const listEl = document.getElementById('passkeyList');
+      const registerBtn = document.getElementById('registerPasskeyBtn');
+      if (!listEl || !registerBtn) return;
+
+      function base64URLToBuffer(base64url) {
+        const base64 = base64url.replace(/-/g, '+').replace(/_/g, '/');
+        const padded = base64 + '='.repeat((4 - (base64.length % 4)) % 4);
+        const binary = atob(padded);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        return bytes;
+      }
+
+      function bufferToBase64URL(buffer) {
+        const bytes = new Uint8Array(buffer);
+        let binary = '';
+        const chunk = 0x8000;
+        for (let i = 0; i < bytes.length; i += chunk) {
+          binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+        }
+        return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+      }
+
+      function formatTime(iso) {
+        try {
+          return new Date(iso).toLocaleString();
+        } catch (_) {
+          return iso || '';
+        }
+      }
+
+      async function loadPasskeys() {
+        try {
+          const res = await apiFetch('/api/passkey/credentials');
+          const result = await res.json();
+          if (!result.success) {
+            listEl.innerHTML = '<p class="text-sm text-gray-500">加载失败，请刷新页面重试</p>';
+            return;
+          }
+          const creds = result.credentials || [];
+          if (creds.length === 0) {
+            listEl.innerHTML = '<p class="text-sm text-gray-500">尚未注册通行密钥</p>';
+            return;
+          }
+          listEl.innerHTML = creds.map((cred) => {
+            const transports = (cred.transports || []).join(', ');
+            return '<div class="flex items-center justify-between bg-white border border-gray-200 rounded-lg px-4 py-3">'
+              + '<div><div class="text-sm font-medium text-gray-800">' + cred.name + '</div>'
+              + '<div class="text-xs text-gray-500">注册于 ' + formatTime(cred.createdAt)
+              + (transports ? ' · ' + transports : '') + '</div></div>'
+              + '<button type="button" class="btn-warning text-white px-3 py-1 rounded-md text-xs font-medium" data-passkey-id="' + cred.id + '">删除</button>'
+              + '</div>';
+          }).join('');
+        } catch (e) {
+          if (e && e.message === 'AUTH_EXPIRED') return;
+          console.error(e);
+          listEl.innerHTML = '<p class="text-sm text-gray-500">加载失败，请刷新页面重试</p>';
+        }
+      }
+
+      listEl.addEventListener('click', async (e) => {
+        const target = e.target.closest('[data-passkey-id]');
+        if (!target) return;
+        const id = target.getAttribute('data-passkey-id');
+        if (!confirm('确定删除这个通行密钥吗？删除后它将无法再用于登录。')) return;
+        try {
+          const res = await apiFetch('/api/passkey/credentials/' + encodeURIComponent(id), { method: 'DELETE' });
+          const result = await res.json().catch(() => ({}));
+          if (!res.ok || !result.success) {
+            throw new Error(result.message || ('HTTP ' + res.status));
+          }
+          showToast('通行密钥已删除', 'success');
+          loadPasskeys();
+        } catch (err) {
+          if (err && err.message === 'AUTH_EXPIRED') return;
+          console.error(err);
+          showToast('删除失败: ' + (err.message || err), 'error');
+        }
+      });
+
+      registerBtn.addEventListener('click', async () => {
+        if (!window.PublicKeyCredential) {
+          showToast('当前浏览器不支持通行密钥', 'error');
+          return;
+        }
+        const original = registerBtn.innerHTML;
+        registerBtn.disabled = true;
+        registerBtn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>等待安全密钥...';
+        try {
+          const optionsRes = await apiFetch('/api/passkey/register-options', { method: 'POST' });
+          const optionsResult = await optionsRes.json();
+          if (!optionsResult.success) {
+            throw new Error(optionsResult.message || '无法开始注册');
+          }
+          const options = optionsResult.options;
+          options.challenge = base64URLToBuffer(options.challenge);
+          options.user.id = base64URLToBuffer(options.user.id);
+          if (options.excludeCredentials) {
+            options.excludeCredentials.forEach((cred) => {
+              cred.id = base64URLToBuffer(cred.id);
+            });
+          }
+
+          const credential = await navigator.credentials.create({ publicKey: options });
+          const response = credential.response;
+          const payload = {
+            id: credential.id,
+            rawId: bufferToBase64URL(credential.rawId),
+            type: credential.type,
+            response: {
+              attestationObject: bufferToBase64URL(response.attestationObject),
+              clientDataJSON: bufferToBase64URL(response.clientDataJSON),
+              transports: response.getTransports ? response.getTransports() : []
+            }
+          };
+
+          const verifyRes = await apiFetch('/api/passkey/register-verify', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+          const verifyResult = await verifyRes.json();
+          if (!verifyResult.success) {
+            throw new Error(verifyResult.message || '注册验证失败');
+          }
+          showToast('通行密钥注册成功', 'success');
+          loadPasskeys();
+        } catch (err) {
+          if (err && err.message === 'AUTH_EXPIRED') return;
+          console.error(err);
+          showToast('注册失败: ' + (err.message || err), 'error');
+        } finally {
+          registerBtn.disabled = false;
+          registerBtn.innerHTML = original;
+        }
+      });
+
+      loadPasskeys();
     })();
   </script>
 </body>

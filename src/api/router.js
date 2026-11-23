@@ -1,4 +1,5 @@
 import { handleLogin, handleLogout, getUserFromRequest } from './handlers/auth.js';
+import { handlePasskeyRequest } from './handlers/passkey.js';
 import { handleGetConfig, handleUpdateConfig } from './handlers/config.js';
 import { handleDashboardStats } from './handlers/dashboard.js';
 import { handleThirdPartyNotify } from './handlers/notify.js';
@@ -20,6 +21,11 @@ async function handleApiRequest(request, env) {
 
   if (path === '/logout' && (method === 'GET' || method === 'POST')) {
     return handleLogout();
+  }
+
+  // 通行密钥登录：注册/管理接口在 handler 内验 JWT，登录接口公开但自带限流
+  if (path.startsWith('/passkey/')) {
+    return handlePasskeyRequest(request, env);
   }
 
   // 第三方通知 API 使用独立 token 鉴权，必须在 JWT 门禁之前放行

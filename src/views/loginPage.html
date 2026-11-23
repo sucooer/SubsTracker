@@ -71,9 +71,38 @@
         若仍使用默认账号 <code>admin</code> / <code>password</code>，登录后请立即在「系统配置」修改密码。
       </p>
     </form>
+
+    <div id="passkeyDivider" class="flex items-center my-6">
+      <div class="flex-grow border-t border-gray-300"></div>
+      <span class="mx-3 text-sm text-gray-500">或</span>
+      <div class="flex-grow border-t border-gray-300"></div>
+    </div>
+    <button type="button" id="passkeyLoginBtn"
+      class="w-full py-3 rounded-lg font-medium focus:outline-none border border-gray-300 bg-white text-gray-700 hover:bg-gray-50">
+      <i class="fas fa-key mr-2"></i>使用通行密钥登录
+    </button>
   </div>
 
   <script>
+    function base64URLToBuffer(base64url) {
+      const base64 = base64url.replace(/-/g, '+').replace(/_/g, '/');
+      const padded = base64 + '='.repeat((4 - (base64.length % 4)) % 4);
+      const binary = atob(padded);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      return bytes;
+    }
+
+    function bufferToBase64URL(buffer) {
+      const bytes = new Uint8Array(buffer);
+      let binary = '';
+      const chunk = 0x8000;
+      for (let i = 0; i < bytes.length; i += chunk) {
+        binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+      }
+      return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    }
+
     document.getElementById('loginForm').addEventListener('submit', async (e) => {
       e.preventDefault();
       const username = document.getElementById('username').value;
@@ -106,6 +135,79 @@
         button.disabled = false;
       }
     });
+
+    // ───────────────────────────────────────────────────────
+    // 通行密钥登录
+    // ───────────────────────────────────────────────────────
+    (function () {
+      const btn = document.getElementById('passkeyLoginBtn');
+      const divider = document.getElementById('passkeyDivider');
+      // 不支持 WebAuthn 的浏览器直接隐藏入口
+      if (!window.PublicKeyCredential) {
+        btn.style.display = 'none';
+        divider.style.display = 'none';
+        return;
+      }
+
+      btn.addEventListener('click', async () => {
+        const originalContent = btn.innerHTML;
+        const errorMsg = document.getElementById('errorMsg');
+        btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>等待安全密钥...';
+        btn.disabled = true;
+        errorMsg.textContent = '';
+
+        try {
+          const optionsRes = await fetch('/api/passkey/login-options', { method: 'POST' });
+          const optionsResult = await optionsRes.json();
+          if (!optionsResult.success) {
+            errorMsg.textContent = optionsResult.message || '通行密钥登录不可用';
+            btn.innerHTML = originalContent;
+            btn.disabled = false;
+            return;
+          }
+
+          const options = optionsResult.options;
+          options.challenge = base64URLToBuffer(options.challenge);
+          if (options.allowCredentials) {
+            options.allowCredentials.forEach((cred) => {
+              cred.id = base64URLToBuffer(cred.id);
+            });
+          }
+
+          const credential = await navigator.credentials.get({ publicKey: options });
+          const response = credential.response;
+          const payload = {
+            id: credential.id,
+            rawId: bufferToBase64URL(credential.rawId),
+            type: credential.type,
+            response: {
+              authenticatorData: bufferToBase64URL(response.authenticatorData),
+              clientDataJSON: bufferToBase64URL(response.clientDataJSON),
+              signature: bufferToBase64URL(response.signature),
+              userHandle: response.userHandle ? bufferToBase64URL(response.userHandle) : null
+            }
+          };
+
+          const verifyRes = await fetch('/api/passkey/login-verify', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+          const verifyResult = await verifyRes.json();
+          if (verifyResult.success) {
+            window.location.href = '/admin';
+          } else {
+            errorMsg.textContent = verifyResult.message || '通行密钥验证失败';
+            btn.innerHTML = originalContent;
+            btn.disabled = false;
+          }
+        } catch (error) {
+          errorMsg.textContent = '通行密钥登录已取消或失败，请重试或使用密码登录';
+          btn.innerHTML = originalContent;
+          btn.disabled = false;
+        }
+      });
+    })();
   </script>
 </body>
 </html>
