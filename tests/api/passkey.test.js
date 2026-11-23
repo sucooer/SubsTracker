@@ -278,3 +278,98 @@ describe('DELETE /api/passkey/credentials/:id', () => {
     expect(res.status).toBe(404);
   });
 });
+
+describe('PATCH /api/passkey/credentials/:id（重命名）', () => {
+  const url = '/api/passkey/credentials/dGVzdC1jcmVkZW50aWFsLWlk';
+
+  it('未登录 → 401', async () => {
+    await seedAdmin();
+    await seedCredential();
+    const res = await app.request(
+      url,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: '新名字' })
+      },
+      env
+    );
+    expect(res.status).toBe(401);
+  });
+
+  it('已登录改名 → 200，列表里名字已变，公钥等字段不动', async () => {
+    await seedAdmin();
+    await seedCredential();
+    const cookie = await loginCookie();
+    const res = await app.request(
+      url,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Cookie: cookie },
+        body: JSON.stringify({ name: '  我的 RS-Key  ' })
+      },
+      env
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.success).toBe(true);
+    expect(body.credential.name).toBe('我的 RS-Key'); // 首尾空白被去掉
+
+    const listRes = await app.request(
+      '/api/passkey/credentials',
+      { headers: { Cookie: cookie } },
+      env
+    );
+    const creds = (await listRes.json()).credentials;
+    expect(creds).toHaveLength(1);
+    expect(creds[0].name).toBe('我的 RS-Key');
+    expect(creds[0].id).toBe('dGVzdC1jcmVkZW50aWFsLWlk');
+  });
+
+  it('改名不存在的凭据 → 404', async () => {
+    await seedAdmin();
+    const res = await app.request(
+      '/api/passkey/credentials/bm90LWhlcmU',
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Cookie: await loginCookie() },
+        body: JSON.stringify({ name: '新名字' })
+      },
+      env
+    );
+    expect(res.status).toBe(404);
+  });
+
+  it('名字为空 → 400', async () => {
+    await seedAdmin();
+    await seedCredential();
+    const res = await app.request(
+      url,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Cookie: await loginCookie() },
+        body: JSON.stringify({ name: '   ' })
+      },
+      env
+    );
+    expect(res.status).toBe(400);
+    expect(String((await res.json()).message)).toMatch(/不能为空/);
+  });
+
+  it('超长名字 → 截断到 64 字符后保存', async () => {
+    await seedAdmin();
+    await seedCredential();
+    const cookie = await loginCookie();
+    const res = await app.request(
+      url,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Cookie: cookie },
+        body: JSON.stringify({ name: '名'.repeat(100) })
+      },
+      env
+    );
+    expect(res.status).toBe(200);
+    expect((await res.json()).credential.name.length).toBe(64);
+  });
+});

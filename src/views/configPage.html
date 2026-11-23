@@ -1859,6 +1859,16 @@
       const registerBtn = document.getElementById('registerPasskeyBtn');
       if (!listEl || !registerBtn) return;
 
+      // 已加载的凭据列表（重命名时取当前名字当默认值）
+      let cachedCreds = [];
+
+      // 名字是用户输入的，渲染进 innerHTML 前要转义
+      function escapeHtml(s) {
+        return String(s == null ? '' : s)
+          .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+      }
+
       function base64URLToBuffer(base64url) {
         const base64 = base64url.replace(/-/g, '+').replace(/_/g, '/');
         const padded = base64 + '='.repeat((4 - (base64.length % 4)) % 4);
@@ -1895,6 +1905,7 @@
             return;
           }
           const creds = result.credentials || [];
+          cachedCreds = creds;
           if (creds.length === 0) {
             listEl.innerHTML = '<p class="text-sm text-gray-500">尚未注册通行密钥</p>';
             return;
@@ -1902,10 +1913,13 @@
           listEl.innerHTML = creds.map((cred) => {
             const transports = (cred.transports || []).join(', ');
             return '<div class="flex items-center justify-between bg-white border border-gray-200 rounded-lg px-4 py-3">'
-              + '<div><div class="text-sm font-medium text-gray-800">' + cred.name + '</div>'
+              + '<div><div class="text-sm font-medium text-gray-800">' + escapeHtml(cred.name) + '</div>'
               + '<div class="text-xs text-gray-500">注册于 ' + formatTime(cred.createdAt)
-              + (transports ? ' · ' + transports : '') + '</div></div>'
+              + (transports ? ' · ' + escapeHtml(transports) : '') + '</div></div>'
+              + '<div class="flex items-center gap-2">'
+              + '<button type="button" class="text-xs font-medium text-indigo-600 hover:text-indigo-800 px-2 py-1" data-passkey-rename="' + cred.id + '">重命名</button>'
               + '<button type="button" class="btn-warning text-white px-3 py-1 rounded-md text-xs font-medium" data-passkey-id="' + cred.id + '">删除</button>'
+              + '</div>'
               + '</div>';
           }).join('');
         } catch (e) {
@@ -1916,6 +1930,31 @@
       }
 
       listEl.addEventListener('click', async (e) => {
+        const renameTarget = e.target.closest('[data-passkey-rename]');
+        if (renameTarget) {
+          const id = renameTarget.getAttribute('data-passkey-rename');
+          const current = (cachedCreds.find((c) => c.id === id) || {}).name || '';
+          const name = prompt('给这个通行密钥起个新名字', current);
+          if (name === null) return; // 点了取消
+          try {
+            const res = await apiFetch('/api/passkey/credentials/' + encodeURIComponent(id), {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ name: name })
+            });
+            const result = await res.json().catch(() => ({}));
+            if (!res.ok || !result.success) {
+              throw new Error(result.message || ('HTTP ' + res.status));
+            }
+            showToast('已重命名为「' + result.credential.name + '」', 'success');
+            loadPasskeys();
+          } catch (err) {
+            if (err && err.message === 'AUTH_EXPIRED') return;
+            console.error(err);
+            showToast('重命名失败: ' + (err.message || err), 'error');
+          }
+          return;
+        }
         const target = e.target.closest('[data-passkey-id]');
         if (!target) return;
         const id = target.getAttribute('data-passkey-id');
@@ -1944,6 +1983,9 @@
         registerBtn.disabled = true;
         registerBtn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>等待安全密钥...';
         try {
+          // 先让用户给这次注册的密钥起个名字（取消则不注册）
+          const name = prompt('给这个通行密钥起个名字', '通行密钥 ' + (cachedCreds.length + 1));
+          if (name === null) return;
           const optionsRes = await apiFetch('/api/passkey/register-options', { method: 'POST' });
           const optionsResult = await optionsRes.json();
           if (!optionsResult.success) {
@@ -1964,6 +2006,7 @@
             id: credential.id,
             rawId: bufferToBase64URL(credential.rawId),
             type: credential.type,
+            name: name,
             response: {
               attestationObject: bufferToBase64URL(response.attestationObject),
               clientDataJSON: bufferToBase64URL(response.clientDataJSON),

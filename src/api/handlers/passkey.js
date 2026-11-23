@@ -9,6 +9,7 @@
  *   POST   /api/passkey/login-verify       登录：验证断言，通过后发 JWT cookie（公开）
  *   GET    /api/passkey/credentials        列出已注册凭据（需登录，不返回公钥）
  *   DELETE /api/passkey/credentials/<id>   删除指定凭据（需登录）
+ *   PATCH  /api/passkey/credentials/<id>   重命名指定凭据（需登录，body: { name }）
  *
  * 存储（SUBSCRIPTIONS_KV）：
  *   passkeys                         凭据数组 [{ id, publicKey, counter, transports, name, createdAt }]
@@ -31,6 +32,13 @@ import { getUserFromRequest } from './auth.js';
 const CHALLENGE_TTL_SECONDS = 300; // challenge 有效期 5 分钟
 const MAX_PASSKEY_ATTEMPTS = 5;
 const PASSKEY_LOCKOUT_SECONDS = 300; // 5 分钟
+const MAX_PASSKEY_NAME_LENGTH = 64; // 凭据名称最长 64 字符
+
+// 名字：去首尾空白、截断到 64 字符；空的或非字符串时用 fallback
+function normalizePasskeyName(value, fallback) {
+  const name = typeof value === 'string' ? value.trim().slice(0, MAX_PASSKEY_NAME_LENGTH) : '';
+  return name || fallback;
+}
 
 function jsonResponse(body, status = 200, extraHeaders = {}) {
   return new Response(JSON.stringify(body), {
@@ -194,7 +202,7 @@ async function handleRegisterVerify(request, env) {
       publicKey: base64URLFromBuffer(credential.publicKey),
       counter: credential.counter,
       transports: credential.transports || body?.response?.transports || [],
-      name: '通行密钥 ' + (list.length + 1),
+      name: normalizePasskeyName(body?.name, '通行密钥 ' + (list.length + 1)),
       createdAt: new Date().toISOString()
     };
     list.push(entry);
@@ -336,6 +344,38 @@ async function handleDeleteCredential(request, env, id) {
   return jsonResponse({ success: true });
 }
 
+async function handleRenameCredential(request, env, id) {
+  const { user } = await getUserFromRequest(request, env);
+  if (!user) {
+    return jsonResponse({ success: false, message: '未授权访问' }, 401);
+  }
+
+  let body;
+  try {
+    body = await request.json();
+  } catch (e) {
+    return jsonResponse({ success: false, message: '请求格式错误' }, 400);
+  }
+
+  // 重命名时空名字是 400（不像注册那样回落到默认名）
+  const name = typeof body?.name === 'string' ? body.name.trim().slice(0, MAX_PASSKEY_NAME_LENGTH) : '';
+  if (!name) {
+    return jsonResponse({ success: false, message: '名称不能为空' }, 400);
+  }
+
+  const list = await getPasskeys(env);
+  const stored = list.find((item) => item.id === id);
+  if (!stored) {
+    return jsonResponse({ success: false, message: '未找到这个通行密钥' }, 404);
+  }
+  stored.name = name;
+  await savePasskeys(env, list);
+  return jsonResponse({
+    success: true,
+    credential: { id: stored.id, name: stored.name, createdAt: stored.createdAt }
+  });
+}
+
 // ─────────────────────────────────────────────────────────────
 // 总入口
 // ─────────────────────────────────────────────────────────────
@@ -362,6 +402,10 @@ async function handlePasskeyRequest(request, env) {
   if (path.startsWith('/passkey/credentials/') && method === 'DELETE') {
     const id = decodeURIComponent(path.slice('/passkey/credentials/'.length));
     return handleDeleteCredential(request, env, id);
+  }
+  if (path.startsWith('/passkey/credentials/') && method === 'PATCH') {
+    const id = decodeURIComponent(path.slice('/passkey/credentials/'.length));
+    return handleRenameCredential(request, env, id);
   }
 
   return jsonResponse({ success: false, message: '未找到请求的资源' }, 404);
